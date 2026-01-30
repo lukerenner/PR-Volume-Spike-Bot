@@ -2,12 +2,9 @@ name: Daily PR Volume Spike Monitor
 
 on:
   schedule:
-    # 18:30 PT is 02:30 UTC next day (standard time) or 01:30 UTC (DST)
-    # GitHub Actions uses UTC.
-    # To be safe run it at ~02:30 UTC (which is evening US time)
-    # Mon-Fri (Monday-Friday in UTC might be Tue-Sat depending on time, 
-    # but 18:30 Mon PT = 02:30 Tue UTC. So Tue-Sat UTC covers Mon-Fri US close.)
-    - cron: '30 2 * * 2-6' 
+    # Run at 16:00 UTC (8:00 AM PST / 11:00 AM EST)
+    # Mon-Fri
+    - cron: '0 16 * * 1-5' 
   workflow_dispatch:
 
 jobs:
