@@ -2,32 +2,46 @@ schedule_timezone: "America/Los_Angeles"
 run_time: "18:30"
 
 universe:
-  mode: "SP1500"  # Options: SP1500, WATCHLIST
-  # If mode is WATCHLIST, this list is used. If SP1500, we fetch a broad US list.
+  mode: "ALL_US"  # Options: SP1500, ALL_US, WATCHLIST
   watchlist: 
     - "AAPL"
-    - "TSLA"
-    - "NVDA"
 
 thresholds:
-  volume_multiple_median: 3.0
-  volume_multiple_mean: 2.5
-  lookback_days: 20
-  min_abs_volume: 500000
-  min_abs_pct_move: 0.0 # Optional secondary filter
+  volume_multiple_median: 5.0
+  volume_multiple_mean: 5.0
+  lookback_days: 30
+  min_abs_volume: 50000
+  min_abs_pct_move: 0.0
 
-pr_window_hours: 36
+# Market Cap Constraint (USD)
+max_market_cap: 50000000
+
+pr_config:
+  window_hours: 24
+  # Time constraint: PR must be published before this time in US/Eastern
+  max_time_et: "09:00" 
+  # Must contain at least one:
+  required_keywords:
+    - "announced"
+    - "announces"
+    - "release"
+    - "launches"
+  # Allowed sources (substring match)
+  allowed_sources:
+    - "PR Newswire"
+    - "Business Wire"
+    - "GlobeNewswire"
+    - "Accesswire"
+    - "Cision"
+    - "Newsfile"
 
 slack:
   webhook_env_var: "SLACK_WEBHOOK_URL"
-  channel_name: "#alerts" # Optional
+  channel_name: "#alerts"
 
 exclusions:
-  # Tickers in these sectors will be ignored (if sector data available)
   sectors: 
     - "Health Care"
-  
-  # Heuristic keywords to ignore if sector data is missing or to double-check
   industries_keywords: 
     - "biotech"
     - "pharma"
@@ -37,5 +51,4 @@ exclusions:
     - "phase"
     - "therapeutics"
     - "biosciences"
-  
   tickers_denylist_path: "config/denylist_tickers.txt"

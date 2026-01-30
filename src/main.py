@@ -6,14 +6,15 @@ import pandas as pd
 import yfinance as yf
 import json
 import os
+import pytz
 from pathlib import Path
 
 from config import load_config, load_denylist
 from providers.market_data import YFinanceProvider
-from providers.pr_sources import RSSPRSource, GoogleNewsFallback
+from providers.pr_sources import RSSPRSource
 from providers.sectors import SectorProvider
 from scoring.volume_spike import VolumeSpikeDetector
-from scoring.filters import PharmaFilter
+from scoring.filters import FilterEngine
 from notify.slack import SlackNotifier
 
 # Configure logging
@@ -36,10 +37,9 @@ def main():
     # Init Components
     market_provider = YFinanceProvider()
     pr_source = RSSPRSource()
-    pr_fallback = GoogleNewsFallback()
     sector_provider = SectorProvider()
     detector = VolumeSpikeDetector(cfg)
-    pharma_filter = PharmaFilter(cfg, denylist)
+    filter_engine = FilterEngine(cfg, denylist)
     notifier = SlackNotifier(os.environ.get(cfg['slack']['webhook_env_var']) if not args.dry_run else None)
 
     # Fetch Universe
@@ -48,147 +48,121 @@ def main():
     tickers = market_provider.get_universe(universe_mode, cfg['universe'].get('watchlist'))
     logger.info(f"Universe size: {len(tickers)}")
 
-    # Stats
     stats = {
         "scanned": 0,
         "spikes": 0,
-        "excluded": 0,
+        "cap_filtered": 0,
+        "pharma_filtered": 0,
         "alerts": 0
     }
-    
     alerts_generated = []
 
-    # Optimization: Use yf.download for bulk if tickers > 10
-    # This avoids serial individual requests
-    params_period = "3mo"
+    # Chunking
+    chunk_size = 100 # Can handle slightly larger chunks for price data
     
-    # Process in chunks of 50 to avoid massive downloads failure
-    chunk_size = 50
-    # Setup window for PR search
-    pr_window_hours = cfg.get('pr_window_hours', 24)
-    # Use timezone-aware UTC for calculation, or just subtract hours from now
-    # We will pass a localized start time if possible, or naive
-    window_start = datetime.datetime.now() - datetime.timedelta(hours=pr_window_hours)
+    # Process
+    window_start = datetime.datetime.now(pytz.utc) - datetime.timedelta(hours=cfg.get('pr_config', {}).get('window_hours', 24))
 
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i+chunk_size]
-        logger.info(f"Processing chunk {i} to {i+len(chunk)}...")
-        
+        logger.info(f"Processing {i}/{len(tickers)}...")
+
         try:
-            # yf.download is verbose, suppress it?
-            # group_by='ticker' makes Ticker the top level column
-            data = yf.download(chunk, period=params_period, group_by='ticker', threads=True, progress=False)
+            # Download bulk price data
+            data = yf.download(chunk, period="3mo", group_by='ticker', threads=True, progress=False)
         except Exception as e:
-            logger.error(f"Failed to download chunk {i}: {e}")
+            logger.error(f"Download failed: {e}")
             continue
 
-        # If only 1 ticker, data levels are different (no top level ticker)
         is_multi = len(chunk) > 1 and isinstance(data.columns, pd.MultiIndex)
         
         for ticker in chunk:
             stats['scanned'] += 1
             
-            # Extract DF for this ticker
             if is_multi:
                 try:
                     df = data[ticker].dropna()
                 except KeyError:
-                    logger.warning(f"No data for {ticker}")
                     continue
             else:
-                # Single ticker case or flat DF
-                # If only 1 ticker in list, yf returns single-level DF
-                df = data.dropna()
-                # If we are failing here logic might be off for 1-item chunk list passed to loop
-                # Robustness: Check columns
-                if 'Close' not in df.columns:
-                     logger.warning(f"Invalid columns for {ticker}")
-                     continue
+                 df = data.dropna()
+                 # Verify it's actually for this ticker (safe for 1-item chunk)
+                 if df.empty: continue
 
             if df.empty:
                 continue
 
-            # Check Spike
-            res = detector.check_spike(df)
-            if res:
-                stats['spikes'] += 1
-                logger.info(f"Spike detected for {ticker}: {res['multiple']}x")
+            # Robust column check
+            # Handle MultiIndex column case where levels might be swapped or named differently
+            if 'Volume' not in df.columns:
+                # Try lowercase or common issues?
+                # For now just skip and log
+                # logger.warning(f"No Volume column for {ticker}, columns: {df.columns}")
+                continue
 
-                # Check Exclusion (Pharma)
-                # Fetch Sector info
-                sector, industry = sector_provider.get_sector_industry(ticker)
+            # 1. SPIKE CHECK
+            res = detector.check_spike(df)
+            if not res:
+                # No spike, skip
+                continue
                 
-                # We don't have PR text yet, so pass empty
-                is_excluded, reason = pharma_filter.is_excluded(ticker, sector, industry)
-                if is_excluded:
-                    logger.info(f"Excluded {ticker}: {reason}")
-                    stats['excluded'] += 1
+            stats['spikes'] += 1
+            logger.info(f"Spike found: {ticker} ({res['multiple']}x)")
+            
+            # 2. MARKET CAP CHECK (Expensive API Call, do only on spills)
+            # Fetch info for this single ticker
+            # Optimize: Maybe we could use yahooquery for batch info if vol is high?
+            # For now, simplistic
+            mcap = market_provider.get_market_cap(ticker)
+            if not filter_engine.check_market_cap(mcap):
+                stats['cap_filtered'] += 1
+                logger.info(f"Filtered {ticker} by Market Cap: {mcap}")
+                continue
+                
+            # 3. PHARMA/SECTOR CHECK
+            sector, industry = sector_provider.get_sector_industry(ticker)
+            is_excl, reason = filter_engine.is_pharma_excluded(ticker, sector, industry)
+            if is_excl:
+                stats['pharma_filtered'] += 1
+                logger.info(f"Filtered {ticker} by Pharma: {reason}")
+                continue
+                
+            # 4. PR CHECK (Strict)
+            prs = pr_source.get_prs(ticker, window_start, cfg)
+            
+            if prs:
+                top_pr = prs[0]
+                # Double check PR text exclusion
+                is_excl_pr, reason_pr = filter_engine.is_pharma_excluded(ticker, sector, industry, top_pr.headline)
+                if is_excl_pr:
+                    stats['pharma_filtered'] += 1
                     continue
 
-                # Fetch PRs
-                prs = pr_source.get_prs(ticker, window_start)
-                if not prs:
-                    # Try fallback
-                    prs = pr_fallback.get_prs(ticker, window_start)
+                # ALERT
+                company = f"{ticker} (Cap: ${mcap:,.0f})" if mcap else ticker
+                links = {
+                    'quote': f"https://finance.yahoo.com/quote/{ticker}",
+                    'chart': f"https://finance.yahoo.com/chart/{ticker}"
+                }
                 
-                if prs:
-                    # Pick best PR (most recent)
-                    top_pr = prs[0] # List is assumed sorted or we sort
-                    # Double check exclusion with PR headline
-                    is_excluded_pr, reason_pr = pharma_filter.is_excluded(ticker, sector, industry, top_pr.headline)
-                    if is_excluded_pr:
-                         logger.info(f"Excluded {ticker} by PR text: {reason_pr}")
-                         stats['excluded'] += 1
-                         continue
-
-                    # Success - Alert!
-                    company = ticker # We don't have easy company name unless we stored it from sector info
-                    # yfinance info has shortName, but we only called it in sector provider.
-                    # Optimization opportunity: modify sector provider to return name too.
-                    # For now pipeline is cleaner to just alert.
-                    
-                    link_quote = f"https://finance.yahoo.com/quote/{ticker}"
-                    link_chart = f"https://finance.yahoo.com/chart/{ticker}"
-                    
-                    logger.info(f"Posting alert for {ticker}")
-                    if not args.dry_run:
-                        notifier.post_alert(ticker, company, res, top_pr, {'quote': link_quote, 'chart': link_chart})
-                    
-                    stats['alerts'] += 1
-                    
-                    alerts_generated.append({
-                        "ticker": ticker,
-                        "spike": res,
-                        "pr": {
-                            "headline": top_pr.headline,
-                            "url": top_pr.url,
-                            "source": top_pr.source,
-                            "date": str(top_pr.published_at)
-                        }
-                    })
-                else:
-                    logger.info(f"No recent PR found for {ticker}")
+                if not args.dry_run:
+                    notifier.post_alert(ticker, company, res, top_pr, links)
+                
+                stats['alerts'] += 1
+                alerts_generated.append({"ticker": ticker, "spike": res, "pr": top_pr._asdict()})
+                logger.info(f"ALERT SENT: {ticker}")
+            else:
+                logger.info(f"No matching PR for {ticker}")
 
     # Summary
     logger.info(f"Run Complete. Stats: {stats}")
-    if not args.dry_run:
-        notifier.post_summary(stats)
-
-    # Save artifacts
+    # Write reports...
     report_path = Path("daily_report.json")
     with open(report_path, "w") as f:
+        # Convert datetime in pr to str
+        for a in alerts_generated:
+            a['pr']['published_at'] = str(a['pr']['published_at'])
         json.dump({"stats": stats, "alerts": alerts_generated}, f, indent=2)
-        
-    md_path = Path("daily_report.md")
-    with open(md_path, "w") as f:
-        f.write("# Daily Spike Report\n\n")
-        f.write(f"**Date:** {datetime.date.today()}\n")
-        f.write(f"**Stats:** {stats}\n\n")
-        if alerts_generated:
-            f.write("## Alerts\n")
-            for a in alerts_generated:
-                f.write(f"- **{a['ticker']}**: {a['spike']['multiple']}x Vol, {a['spike']['pct_change']}% Price\n")
-                f.write(f"  - [{a['pr']['headline']}]({a['pr']['url']})\n")
 
 if __name__ == "__main__":
     main()
