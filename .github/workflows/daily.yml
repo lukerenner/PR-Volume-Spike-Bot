@@ -1,0 +1,50 @@
+name: Daily PR Volume Spike Monitor
+
+on:
+  schedule:
+    # 18:30 PT is 02:30 UTC next day (standard time) or 01:30 UTC (DST)
+    # GitHub Actions uses UTC.
+    # To be safe run it at ~02:30 UTC (which is evening US time)
+    # Mon-Fri (Monday-Friday in UTC might be Tue-Sat depending on time, 
+    # but 18:30 Mon PT = 02:30 Tue UTC. So Tue-Sat UTC covers Mon-Fri US close.)
+    - cron: '30 2 * * 2-6' 
+  workflow_dispatch:
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Monitor
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          # Set python path to current directory so src modules can be imported
+          export PYTHONPATH=$PYTHONPATH:.
+          python src/main.py
+
+      - name: Upload Report JSON
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-report-json
+          path: daily_report.json
+
+      - name: Upload Report Markdown
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-report-md
+          path: daily_report.md

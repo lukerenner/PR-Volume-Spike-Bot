@@ -1,0 +1,41 @@
+schedule_timezone: "America/Los_Angeles"
+run_time: "18:30"
+
+universe:
+  mode: "SP1500"  # Options: SP1500, WATCHLIST
+  # If mode is WATCHLIST, this list is used. If SP1500, we fetch a broad US list.
+  watchlist: 
+    - "AAPL"
+    - "TSLA"
+    - "NVDA"
+
+thresholds:
+  volume_multiple_median: 3.0
+  volume_multiple_mean: 2.5
+  lookback_days: 20
+  min_abs_volume: 500000
+  min_abs_pct_move: 0.0 # Optional secondary filter
+
+pr_window_hours: 36
+
+slack:
+  webhook_env_var: "SLACK_WEBHOOK_URL"
+  channel_name: "#alerts" # Optional
+
+exclusions:
+  # Tickers in these sectors will be ignored (if sector data available)
+  sectors: 
+    - "Health Care"
+  
+  # Heuristic keywords to ignore if sector data is missing or to double-check
+  industries_keywords: 
+    - "biotech"
+    - "pharma"
+    - "clinical"
+    - "trial"
+    - "FDA"
+    - "phase"
+    - "therapeutics"
+    - "biosciences"
+  
+  tickers_denylist_path: "config/denylist_tickers.txt"
