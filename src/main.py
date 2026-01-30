@@ -38,28 +38,60 @@ def main():
     market_provider = YFinanceProvider()
 
     # MARKET STATUS CHECK
-    # Check if market was open today by looking at SPY
     logger.info("Checking if market was open today...")
+    
+    # Defaults
+    search_start_time = datetime.datetime.now(pytz.utc) - datetime.timedelta(hours=48)
+
     try:
         spy = yf.download("SPY", period="5d", progress=False)
         if spy.empty:
-            logger.warning("Could not fetch SPY data. Assuming market OPEN to be safe.")
+            logger.warning("Could not fetch SPY data. Assuming market OPEN.")
         else:
-            last_date = spy.index[-1].date()
-            today_date = datetime.datetime.now(pytz.timezone('US/Eastern')).date()
+            # spy index is Timestamps (dates)
+            last_date_ts = spy.index[-1]
+            last_date = last_date_ts.date()
+            today_now = datetime.datetime.now(pytz.timezone('US/Eastern'))
+            today_date = today_now.date()
             
-            # Allow for slight timezone diffs, but basically if last_date < today_date, market closed?
-            # Or data not up yet? At 4:15 PM ET, SPY should have today's candle.
+            # 1. Check if Market Closed Today
+            # If last candle is before today, market didn't trade today (or data missing)
             if last_date < today_date:
                 logger.info(f"Market appears closed. Last data: {last_date}, Today: {today_date}. Exiting.")
                 if not args.dry_run:
-                    # Optional: Post "Market Closed" to Slack or just silent? User said "no need to run".
-                    pass
-                sys.exit(0)
+                    sys.exit(0)
             logger.info(f"Market confirmed open. Last data: {last_date}")
 
+            # 2. Calculate "Previous Close" for PR Search
+            # If spy has today's candle, then index[-2] is previous trading day.
+            if len(spy) >= 2:
+                prev_day_ts = spy.index[-2]
+                # define 4:00 PM ET on that day
+                # prev_day_ts is usually 00:00 midnight naive or UTC
+                # We want 16:00 ET on that date.
+                
+                # Careful with yfinance timezone. Usually it returns naive or localized to UTC 00:00.
+                if prev_day_ts.tzinfo is None:
+                     # Assume it's the date
+                     prev_day_date = prev_day_ts.date()
+                     # Construct 16:00 ET
+                     et_tz = pytz.timezone('US/Eastern')
+                     prev_close_et = et_tz.localize(datetime.datetime.combine(prev_day_date, datetime.time(16, 0)))
+                     # Convert to UTC for consistency
+                     search_start_time = prev_close_et.astimezone(pytz.utc)
+                else:
+                     # If it's already TZ aware, ensure we get the date part and do same
+                     prev_day_date = prev_day_ts.date()
+                     et_tz = pytz.timezone('US/Eastern')
+                     prev_close_et = et_tz.localize(datetime.datetime.combine(prev_day_date, datetime.time(16, 0)))
+                     search_start_time = prev_close_et.astimezone(pytz.utc)
+                
+                logger.info(f"Previous market close determined as: {search_start_time} (UTC)")
+            else:
+                 logger.warning("Not enough SPY data to determine previous close. Using default 48h.")
+
     except Exception as e:
-        logger.error(f"Market status check failed: {e}. Proceeding anyway.")
+        logger.error(f"Market status check failed: {e}. Proceeding with default window.", exc_info=True)
 
     pr_source = RSSPRSource()
     sector_provider = SectorProvider()
@@ -85,8 +117,8 @@ def main():
     # Chunking
     chunk_size = 100 
     
-    # Process
-    window_start = datetime.datetime.now(pytz.utc) - datetime.timedelta(hours=cfg.get('pr_config', {}).get('window_hours', 24))
+    # Process using search_start_time from above
+    window_start = search_start_time
 
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i+chunk_size]

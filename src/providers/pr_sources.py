@@ -17,6 +17,7 @@ class PRItem(NamedTuple):
     published_at: datetime.datetime
 
 class PRSource(ABC):
+    # We ignore config 'window_hours' if window_start is passed specifically
     @abstractmethod
     def get_prs(self, ticker: str, window_start: datetime.datetime, config: dict) -> List[PRItem]:
         pass
@@ -30,8 +31,7 @@ class RSSPRSource(PRSource):
         allowed_sources = [s.lower() for s in pr_cfg.get('allowed_sources', [])]
         required_keywords = [k.lower() for k in pr_cfg.get('required_keywords', [])]
         
-        # Parse Exclusion Window
-        # Defaults to 9:30 - 16:00
+        # Exclusion Window (defaults 9:30 - 16:00)
         excl_start_str = pr_cfg.get('exclude_time_start_et', "09:30")
         excl_end_str = pr_cfg.get('exclude_time_end_et', "16:00")
         
@@ -68,18 +68,19 @@ class RSSPRSource(PRSource):
                 dt_utc = datetime.datetime.fromtimestamp(time.mktime(entry.published_parsed), pytz.utc)
                 dt_et = dt_utc.astimezone(EASTERN)
                 
-                # Is it between start and end? (Inclusive or Exclusive?)
-                # "Never published during market open"
-                # If 09:30 <= t <= 16:00 -> Exclude
-                t = dt_et.time()
-                if t_start <= t <= t_end:
+                # Dynamic Window Check first (Must be AFTER prev close)
+                # window_start is passed from main as UTC
+                if dt_utc <= window_start.replace(tzinfo=pytz.utc):
                     continue
 
-                # 4. Window Check (Recency)
-                if dt_utc < window_start.replace(tzinfo=pytz.utc):
-                    continue
+                # Market Hours Exclusion (9:30-16:00 ET)
+                # ONLY apply on Weekdays (Mon=0, Sun=6). Sat(5)/Sun(6) are always valid.
+                if dt_et.weekday() < 5: # 0-4 is Mon-Fri
+                    t = dt_et.time()
+                    if t_start <= t <= t_end:
+                        # Exclude Intraday
+                        continue
 
-                # Find source name for display
                 found_source = "Yahoo"
                 for s in allowed_sources: 
                     if s in full_text: 
