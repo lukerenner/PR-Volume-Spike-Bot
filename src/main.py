@@ -58,7 +58,7 @@ def main():
     alerts_generated = []
 
     # Chunking
-    chunk_size = 100 # Can handle slightly larger chunks for price data
+    chunk_size = 100 
     
     # Process
     window_start = datetime.datetime.now(pytz.utc) - datetime.timedelta(hours=cfg.get('pr_config', {}).get('window_hours', 24))
@@ -68,7 +68,6 @@ def main():
         logger.info(f"Processing {i}/{len(tickers)}...")
 
         try:
-            # Download bulk price data
             data = yf.download(chunk, period="3mo", group_by='ticker', threads=True, progress=False)
         except Exception as e:
             logger.error(f"Download failed: {e}")
@@ -86,33 +85,24 @@ def main():
                     continue
             else:
                  df = data.dropna()
-                 # Verify it's actually for this ticker (safe for 1-item chunk)
                  if df.empty: continue
 
             if df.empty:
                 continue
 
             # Robust column check
-            # Handle MultiIndex column case where levels might be swapped or named differently
             if 'Volume' not in df.columns:
-                # Try lowercase or common issues?
-                # For now just skip and log
-                # logger.warning(f"No Volume column for {ticker}, columns: {df.columns}")
                 continue
 
             # 1. SPIKE CHECK
             res = detector.check_spike(df)
             if not res:
-                # No spike, skip
                 continue
                 
             stats['spikes'] += 1
             logger.info(f"Spike found: {ticker} ({res['multiple']}x)")
             
-            # 2. MARKET CAP CHECK (Expensive API Call, do only on spills)
-            # Fetch info for this single ticker
-            # Optimize: Maybe we could use yahooquery for batch info if vol is high?
-            # For now, simplistic
+            # 2. MARKET CAP CHECK 
             mcap = market_provider.get_market_cap(ticker)
             if not filter_engine.check_market_cap(mcap):
                 stats['cap_filtered'] += 1
@@ -136,33 +126,46 @@ def main():
                 is_excl_pr, reason_pr = filter_engine.is_pharma_excluded(ticker, sector, industry, top_pr.headline)
                 if is_excl_pr:
                     stats['pharma_filtered'] += 1
+                    logger.info(f"Filtered {ticker} by PR Text: {reason_pr}")
                     continue
 
-                # ALERT
-                company = f"{ticker} (Cap: ${mcap:,.0f})" if mcap else ticker
-                links = {
-                    'quote': f"https://finance.yahoo.com/quote/{ticker}",
-                    'chart': f"https://finance.yahoo.com/chart/{ticker}"
-                }
-                
-                if not args.dry_run:
-                    notifier.post_alert(ticker, company, res, top_pr, links)
-                
+                # Add to report (Don't alert yet)
                 stats['alerts'] += 1
-                alerts_generated.append({"ticker": ticker, "spike": res, "pr": top_pr._asdict()})
-                logger.info(f"ALERT SENT: {ticker}")
+                
+                # We store the raw PR object for the notifier, but convert for JSON dump later
+                alerts_generated.append({
+                    "ticker": ticker, 
+                    "spike": res, 
+                    "pr": top_pr,
+                    "market_cap": mcap
+                })
+                logger.info(f"Found Alert candidate: {ticker}")
             else:
                 logger.info(f"No matching PR for {ticker}")
 
-    # Summary
+    # END OF LOOP
     logger.info(f"Run Complete. Stats: {stats}")
-    # Write reports...
+    
+    # Send Consolidated Slack
+    if alerts_generated and not args.dry_run:
+        notifier.post_final_report(alerts_generated)
+    elif args.dry_run and alerts_generated:
+        logger.info("Dry run: Skipping Slack post. Candidates found:")
+        for a in alerts_generated:
+            logger.info(f" - {a['ticker']}: {a['pr'].headline}")
+
+    # Save reports
     report_path = Path("daily_report.json")
     with open(report_path, "w") as f:
-        # Convert datetime in pr to str
+        # Convert objects to dicts for JSON
+        serializable_alerts = []
         for a in alerts_generated:
-            a['pr']['published_at'] = str(a['pr']['published_at'])
-        json.dump({"stats": stats, "alerts": alerts_generated}, f, indent=2)
+            item = a.copy()
+            item['pr'] = a['pr']._asdict()
+            item['pr']['published_at'] = str(item['pr']['published_at'])
+            serializable_alerts.append(item)
+            
+        json.dump({"stats": stats, "alerts": serializable_alerts}, f, indent=2)
 
 if __name__ == "__main__":
     main()
