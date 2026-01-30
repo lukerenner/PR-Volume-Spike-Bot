@@ -18,8 +18,9 @@ max_market_cap: 50000000
 
 pr_config:
   window_hours: 24
-  # Time constraint: PR must be published before this time in US/Eastern
-  max_time_et: "09:00" 
+  # Time constraint: Exclude intraday PRs (Market Open)
+  exclude_time_start_et: "09:30"
+  exclude_time_end_et: "16:00"
   # Must contain at least one:
   required_keywords:
     - "announced"

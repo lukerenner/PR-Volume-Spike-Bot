@@ -103,7 +103,10 @@ def main():
             logger.info(f"Spike found: {ticker} ({res['multiple']}x)")
             
             # 2. MARKET CAP CHECK 
-            mcap = market_provider.get_market_cap(ticker)
+            details = market_provider.get_ticker_details(ticker)
+            mcap = details.get('market_cap')
+            name = details.get('name')
+            
             if not filter_engine.check_market_cap(mcap):
                 stats['cap_filtered'] += 1
                 logger.info(f"Filtered {ticker} by Market Cap: {mcap}")
@@ -111,7 +114,7 @@ def main():
                 
             # 3. PHARMA/SECTOR CHECK
             sector, industry = sector_provider.get_sector_industry(ticker)
-            is_excl, reason = filter_engine.is_pharma_excluded(ticker, sector, industry)
+            is_excl, reason = filter_engine.is_pharma_excluded(ticker, sector, industry, name) # Name check too?
             if is_excl:
                 stats['pharma_filtered'] += 1
                 logger.info(f"Filtered {ticker} by Pharma: {reason}")
@@ -129,12 +132,12 @@ def main():
                     logger.info(f"Filtered {ticker} by PR Text: {reason_pr}")
                     continue
 
-                # Add to report (Don't alert yet)
+                # Add to report
                 stats['alerts'] += 1
                 
-                # We store the raw PR object for the notifier, but convert for JSON dump later
                 alerts_generated.append({
                     "ticker": ticker, 
+                    "company_name": name,
                     "spike": res, 
                     "pr": top_pr,
                     "market_cap": mcap
