@@ -42,20 +42,23 @@ def main():
     
     # Defaults
     search_start_time = datetime.datetime.now(pytz.utc) - datetime.timedelta(hours=48)
+    trading_dates = set()
 
     try:
-        spy = yf.download("SPY", period="5d", progress=False)
+        spy = yf.download("SPY", period="10d", progress=False) # Increased to 10d to capture recent holidays
         if spy.empty:
             logger.warning("Could not fetch SPY data. Assuming market OPEN.")
         else:
-            # spy index is Timestamps (dates)
+            # Capture all valid trading dates from SPY index
+            # Index is DatetimeIndex, convert to date objects
+            trading_dates = set(ts.date() for ts in spy.index)
+            
             last_date_ts = spy.index[-1]
             last_date = last_date_ts.date()
             today_now = datetime.datetime.now(pytz.timezone('US/Eastern'))
             today_date = today_now.date()
             
             # 1. Check if Market Closed Today
-            # If last candle is before today, market didn't trade today (or data missing)
             if last_date < today_date:
                 logger.info(f"Market appears closed. Last data: {last_date}, Today: {today_date}. Exiting.")
                 if not args.dry_run:
@@ -63,24 +66,14 @@ def main():
             logger.info(f"Market confirmed open. Last data: {last_date}")
 
             # 2. Calculate "Previous Close" for PR Search
-            # If spy has today's candle, then index[-2] is previous trading day.
             if len(spy) >= 2:
                 prev_day_ts = spy.index[-2]
-                # define 4:00 PM ET on that day
-                # prev_day_ts is usually 00:00 midnight naive or UTC
-                # We want 16:00 ET on that date.
-                
-                # Careful with yfinance timezone. Usually it returns naive or localized to UTC 00:00.
                 if prev_day_ts.tzinfo is None:
-                     # Assume it's the date
                      prev_day_date = prev_day_ts.date()
-                     # Construct 16:00 ET
                      et_tz = pytz.timezone('US/Eastern')
                      prev_close_et = et_tz.localize(datetime.datetime.combine(prev_day_date, datetime.time(16, 0)))
-                     # Convert to UTC for consistency
                      search_start_time = prev_close_et.astimezone(pytz.utc)
                 else:
-                     # If it's already TZ aware, ensure we get the date part and do same
                      prev_day_date = prev_day_ts.date()
                      et_tz = pytz.timezone('US/Eastern')
                      prev_close_et = et_tz.localize(datetime.datetime.combine(prev_day_date, datetime.time(16, 0)))
@@ -104,6 +97,7 @@ def main():
     logger.info(f"Fetching universe for mode: {universe_mode}")
     tickers = market_provider.get_universe(universe_mode, cfg['universe'].get('watchlist'))
     logger.info(f"Universe size: {len(tickers)}")
+
 
     stats = {
         "scanned": 0,
@@ -178,7 +172,7 @@ def main():
                 continue
                 
             # 4. PR CHECK (Strict)
-            prs = pr_source.get_prs(ticker, window_start, cfg)
+            prs = pr_source.get_prs(ticker, window_start, cfg, trading_dates)
             
             if prs:
                 top_pr = prs[0]
