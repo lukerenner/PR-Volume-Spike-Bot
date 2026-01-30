@@ -2,9 +2,9 @@ name: Daily PR Volume Spike Monitor
 
 on:
   schedule:
-    # Run at 16:00 UTC (8:00 AM PST / 11:00 AM EST)
-    # Mon-Fri
-    - cron: '0 16 * * 1-5' 
+    # Run at 21:15 UTC (4:15 PM EST / 1:15 PM PST)
+    # Covers Market Close (16:00 ET) with 15m buffer for data settlement.
+    - cron: '15 21 * * 1-5' 
   workflow_dispatch:
 
 jobs:

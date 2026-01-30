@@ -36,6 +36,31 @@ def main():
 
     # Init Components
     market_provider = YFinanceProvider()
+
+    # MARKET STATUS CHECK
+    # Check if market was open today by looking at SPY
+    logger.info("Checking if market was open today...")
+    try:
+        spy = yf.download("SPY", period="5d", progress=False)
+        if spy.empty:
+            logger.warning("Could not fetch SPY data. Assuming market OPEN to be safe.")
+        else:
+            last_date = spy.index[-1].date()
+            today_date = datetime.datetime.now(pytz.timezone('US/Eastern')).date()
+            
+            # Allow for slight timezone diffs, but basically if last_date < today_date, market closed?
+            # Or data not up yet? At 4:15 PM ET, SPY should have today's candle.
+            if last_date < today_date:
+                logger.info(f"Market appears closed. Last data: {last_date}, Today: {today_date}. Exiting.")
+                if not args.dry_run:
+                    # Optional: Post "Market Closed" to Slack or just silent? User said "no need to run".
+                    pass
+                sys.exit(0)
+            logger.info(f"Market confirmed open. Last data: {last_date}")
+
+    except Exception as e:
+        logger.error(f"Market status check failed: {e}. Proceeding anyway.")
+
     pr_source = RSSPRSource()
     sector_provider = SectorProvider()
     detector = VolumeSpikeDetector(cfg)
