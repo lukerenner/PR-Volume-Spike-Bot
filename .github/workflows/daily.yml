@@ -1,10 +1,16 @@
-name: Daily PR Volume Spike Monitor
+name: PR Volume Spike Monitor (3x Daily)
 
 on:
   schedule:
-    # Run at 21:15 UTC (4:15 PM EST / 1:15 PM PST)
-    # Covers Market Close (16:00 ET) with 15m buffer for data settlement.
-    - cron: '15 21 * * 1-5' 
+    # Morning: 15:30 UTC = 10:30 AM EST / 7:30 AM PST
+    # Catches overnight & pre-market PR-driven spikes in the first hour of trading
+    - cron: '30 15 * * 1-5'
+    # Midday:  18:00 UTC =  1:00 PM EST / 10:00 AM PST
+    # Catches midday spikes as volume patterns crystallize
+    - cron: '0 18 * * 1-5'
+    # Closing: 21:15 UTC =  4:15 PM EST / 1:15 PM PST
+    # Final sweep after market close with settled data
+    - cron: '15 21 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -32,16 +38,9 @@ jobs:
           export PYTHONPATH=$PYTHONPATH:.
           python src/main.py
 
-      - name: Upload Report JSON
+      - name: Upload Report Artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: daily-report-json
-          path: daily_report.json
-
-      - name: Upload Report Markdown
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: daily-report-md
-          path: daily_report.md
+          name: report-${{ github.run_id }}
+          path: daily_report_*.json

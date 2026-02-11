@@ -111,16 +111,19 @@ class RSSPRSource(PRSource):
         pr_cfg = config.get('pr_config', {})
         required_keywords = [k.lower() for k in pr_cfg.get('required_keywords', [])]
 
-        # Exclusion Window
-        excl_start_str = pr_cfg.get('exclude_time_start_et', "09:30")
-        excl_end_str = pr_cfg.get('exclude_time_end_et', "16:00")
-        try:
-            h1, m1 = map(int, excl_start_str.split(':'))
-            h2, m2 = map(int, excl_end_str.split(':'))
-            t_start = datetime.time(h1, m1)
-            t_end = datetime.time(h2, m2)
-        except:
-            t_start, t_end = datetime.time(9, 30), datetime.time(16, 0)
+        # Exclusion Window (empty strings disable the exclusion)
+        excl_start_str = pr_cfg.get('exclude_time_start_et', "")
+        excl_end_str = pr_cfg.get('exclude_time_end_et', "")
+        t_start = None
+        t_end = None
+        if excl_start_str and excl_end_str:
+            try:
+                h1, m1 = map(int, excl_start_str.split(':'))
+                h2, m2 = map(int, excl_end_str.split(':'))
+                t_start = datetime.time(h1, m1)
+                t_end = datetime.time(h2, m2)
+            except:
+                t_start, t_end = None, None
 
         all_prs = self._fetch_all_prs()
         results = []
@@ -169,7 +172,7 @@ class RSSPRSource(PRSource):
                 if dt_et.weekday() >= 5:  # Sat/Sun
                     should_check_time = False
 
-            if should_check_time:
+            if should_check_time and t_start is not None and t_end is not None:
                 t = dt_et.time()
                 if t_start <= t <= t_end:
                     continue

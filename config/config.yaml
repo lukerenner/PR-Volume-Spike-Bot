@@ -3,30 +3,44 @@ run_time: "18:30"
 
 universe:
   mode: "ALL_US"  # Options: SP1500, ALL_US, WATCHLIST
-  watchlist: 
+  watchlist:
     - "AAPL"
 
 thresholds:
-  volume_multiple_median: 5.0
-  volume_multiple_mean: 5.0
+  volume_multiple_median: 3.0
+  volume_multiple_mean: 3.0
   lookback_days: 30
-  min_abs_volume: 50000
+  min_abs_volume: 25000
   min_abs_pct_move: 0.0
 
-# Market Cap Constraint (USD)
-max_market_cap: 50000000
+# Market Cap Constraint (USD) — raised to $500M to include small-caps
+max_market_cap: 500000000
 
 pr_config:
-  window_hours: 24
-  # Time constraint: Exclude intraday PRs (Market Open)
-  exclude_time_start_et: "09:30"
-  exclude_time_end_et: "16:00"
+  window_hours: 36
+  # No intraday PR exclusion — PRs released at any time can cause spikes
+  exclude_time_start_et: ""
+  exclude_time_end_et: ""
   # Must contain at least one:
   required_keywords:
     - "announced"
     - "announces"
     - "release"
     - "launches"
+    - "partnership"
+    - "contract"
+    - "acquisition"
+    - "merger"
+    - "agreement"
+    - "awarded"
+    - "selected"
+    - "expands"
+    - "enters"
+    - "reports"
+    - "completes"
+    - "signs"
+    - "secures"
+    - "receives"
   # Allowed sources (substring match)
   allowed_sources:
     - "PR Newswire"
@@ -41,9 +55,9 @@ slack:
   channel_name: "#alerts"
 
 exclusions:
-  sectors: 
+  sectors:
     - "Health Care"
-  industries_keywords: 
+  industries_keywords:
     - "biotech"
     - "pharma"
     - "clinical"

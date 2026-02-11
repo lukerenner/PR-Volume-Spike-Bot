@@ -21,10 +21,27 @@ from notify.slack import SlackNotifier
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+EASTERN = pytz.timezone('US/Eastern')
+
+def get_run_label() -> str:
+    """Auto-detect which run this is based on current Eastern time."""
+    now_et = datetime.datetime.now(EASTERN)
+    hour = now_et.hour
+    if hour < 12:
+        return "Morning"
+    elif hour < 15:
+        return "Midday"
+    else:
+        return "Closing"
+
 def main():
     parser = argparse.ArgumentParser(description="PR Volume Spike Bot")
     parser.add_argument("--dry-run", action="store_true", help="Do not send Slack alerts")
+    parser.add_argument("--run-label", type=str, default=None, help="Override run label (Morning/Midday/Closing)")
     args = parser.parse_args()
+
+    run_label = args.run_label or get_run_label()
+    logger.info(f"=== PR Volume Spike Bot — {run_label} Run ===")
 
     # Load Config
     try:
@@ -38,48 +55,50 @@ def main():
     market_provider = YFinanceProvider()
 
     # MARKET STATUS CHECK
-    logger.info("Checking if market was open today...")
-    
+    logger.info("Checking market status...")
+
     # Defaults
     search_start_time = datetime.datetime.now(pytz.utc) - datetime.timedelta(hours=48)
     trading_dates = set()
 
     try:
-        spy = yf.download("SPY", period="10d", progress=False) # Increased to 10d to capture recent holidays
+        spy = yf.download("SPY", period="10d", progress=False)
         if spy.empty:
             logger.warning("Could not fetch SPY data. Assuming market OPEN.")
         else:
-            # Capture all valid trading dates from SPY index
-            # Index is DatetimeIndex, convert to date objects
             trading_dates = set(ts.date() for ts in spy.index)
-            
+
             last_date_ts = spy.index[-1]
             last_date = last_date_ts.date()
-            today_now = datetime.datetime.now(pytz.timezone('US/Eastern'))
+            today_now = datetime.datetime.now(EASTERN)
             today_date = today_now.date()
-            
-            # 1. Check if Market Closed Today
-            if last_date < today_date:
-                logger.info(f"Market appears closed. Last data: {last_date}, Today: {today_date}. Exiting.")
-                if not args.dry_run:
-                    sys.exit(0)
-            logger.info(f"Market confirmed open. Last data: {last_date}")
 
-            # 2. Calculate "Previous Close" for PR Search
+            # For Morning/Midday runs, market is still open. We check if today
+            # is a trading day by confirming SPY has data for today OR that
+            # the last trading day was recent enough (yesterday for weekdays).
+            if last_date < today_date:
+                # Market may not have opened yet (very early run) or it's a holiday.
+                # If this is a Morning run and today is a weekday, give it the benefit
+                # of the doubt — yfinance may not have intraday data yet.
+                is_weekday = today_date.weekday() < 5
+                if run_label == "Morning" and is_weekday:
+                    logger.info(f"Morning run: no data for today yet (last: {last_date}). "
+                                f"Proceeding — market may have just opened.")
+                else:
+                    logger.info(f"Market appears closed. Last data: {last_date}, Today: {today_date}. Exiting.")
+                    if not args.dry_run:
+                        sys.exit(0)
+            else:
+                logger.info(f"Market confirmed open. Last data: {last_date}")
+
+            # Calculate "Previous Close" for PR search window
             if len(spy) >= 2:
                 prev_day_ts = spy.index[-2]
-                if prev_day_ts.tzinfo is None:
-                     prev_day_date = prev_day_ts.date()
-                     et_tz = pytz.timezone('US/Eastern')
-                     prev_close_et = et_tz.localize(datetime.datetime.combine(prev_day_date, datetime.time(16, 0)))
-                     search_start_time = prev_close_et.astimezone(pytz.utc)
-                else:
-                     prev_day_date = prev_day_ts.date()
-                     et_tz = pytz.timezone('US/Eastern')
-                     prev_close_et = et_tz.localize(datetime.datetime.combine(prev_day_date, datetime.time(16, 0)))
-                     search_start_time = prev_close_et.astimezone(pytz.utc)
-                
-                logger.info(f"Previous market close determined as: {search_start_time} (UTC)")
+                prev_day_date = prev_day_ts.date()
+                et_tz = EASTERN
+                prev_close_et = et_tz.localize(datetime.datetime.combine(prev_day_date, datetime.time(16, 0)))
+                search_start_time = prev_close_et.astimezone(pytz.utc)
+                logger.info(f"PR search window starts at: {search_start_time} (UTC)")
             else:
                  logger.warning("Not enough SPY data to determine previous close. Using default 48h.")
 
@@ -198,28 +217,34 @@ def main():
                 logger.info(f"No matching PR for {ticker}")
 
     # END OF LOOP
-    logger.info(f"Run Complete. Stats: {stats}")
-    
+    logger.info(f"{run_label} Run Complete. Stats: {stats}")
+
     # Send Consolidated Slack
     if alerts_generated and not args.dry_run:
-        notifier.post_final_report(alerts_generated)
+        notifier.post_final_report(alerts_generated, run_label=run_label)
     elif args.dry_run and alerts_generated:
-        logger.info("Dry run: Skipping Slack post. Candidates found:")
+        logger.info(f"Dry run ({run_label}): Skipping Slack post. Candidates found:")
         for a in alerts_generated:
             logger.info(f" - {a['ticker']}: {a['pr'].headline}")
+    elif not alerts_generated:
+        logger.info(f"{run_label} run found 0 alerts.")
 
-    # Save reports
-    report_path = Path("daily_report.json")
+    # Save reports (include run label in filename to avoid overwriting between runs)
+    label_slug = run_label.lower()
+    report_path = Path(f"daily_report_{label_slug}.json")
     with open(report_path, "w") as f:
-        # Convert objects to dicts for JSON
         serializable_alerts = []
         for a in alerts_generated:
             item = a.copy()
             item['pr'] = a['pr']._asdict()
             item['pr']['published_at'] = str(item['pr']['published_at'])
             serializable_alerts.append(item)
-            
-        json.dump({"stats": stats, "alerts": serializable_alerts}, f, indent=2)
+
+        json.dump({
+            "run_label": run_label,
+            "stats": stats,
+            "alerts": serializable_alerts
+        }, f, indent=2)
 
 if __name__ == "__main__":
     main()
