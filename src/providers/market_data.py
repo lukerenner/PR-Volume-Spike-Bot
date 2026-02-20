@@ -14,7 +14,7 @@ class MarketDataProvider(ABC):
 
     @abstractmethod
     def get_ticker_details(self, ticker: str) -> Dict:
-        """Returns dict with 'market_cap' (float) and 'name' (str)"""
+        """Returns dict with 'market_cap', 'name', 'sector', 'industry'."""
         pass
 
 class YFinanceProvider(MarketDataProvider):
@@ -22,14 +22,13 @@ class YFinanceProvider(MarketDataProvider):
         if mode == "WATCHLIST":
             return config_watchlist or []
         elif mode == "SP1500":
-             return ["AAPL", "MSFT"] # Simplified fallback
+            return self._fetch_all_us_tickers() or config_watchlist or []
         elif mode == "ALL_US":
             return self._fetch_all_us_tickers() or config_watchlist or []
         else:
             return []
 
     def _fetch_all_us_tickers(self) -> List[str]:
-        # Try SEC EDGAR first (most reliable), then Nasdaq FTP as fallback
         tickers = self._fetch_from_sec_edgar()
         if tickers:
             return tickers
@@ -67,39 +66,68 @@ class YFinanceProvider(MarketDataProvider):
         try:
             url = "http://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
             df = pd.read_csv(url, sep="|")
-            if 'Test Issue' in df.columns: df = df[df['Test Issue'] != 'Y']
-            if 'Symbol' in df.columns: tickers.update(df['Symbol'].unique())
+            if 'Test Issue' in df.columns:
+                df = df[df['Test Issue'] != 'Y']
+            if 'Symbol' in df.columns:
+                tickers.update(df['Symbol'].unique())
         except Exception as e:
             logger.warning(f"Nasdaq listed fetch failed: {e}")
 
         try:
             url = "http://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
             df = pd.read_csv(url, sep="|")
-            if 'Test Issue' in df.columns: df = df[df['Test Issue'] != 'Y']
-            if 'ACT Symbol' in df.columns: tickers.update(df['ACT Symbol'].unique())
-            elif 'Symbol' in df.columns: tickers.update(df['Symbol'].unique())
+            if 'Test Issue' in df.columns:
+                df = df[df['Test Issue'] != 'Y']
+            if 'ACT Symbol' in df.columns:
+                tickers.update(df['ACT Symbol'].unique())
+            elif 'Symbol' in df.columns:
+                tickers.update(df['Symbol'].unique())
         except Exception as e:
             logger.warning(f"Nasdaq other-listed fetch failed: {e}")
 
-        cleaned = []
-        for t in tickers:
-             if isinstance(t, str): cleaned.append(t.replace('.', '-'))
+        cleaned = [t.replace('.', '-') for t in tickers if isinstance(t, str)]
         if cleaned:
             logger.info(f"Nasdaq FTP returned {len(cleaned)} tickers")
         return sorted(cleaned)
 
-    def get_market_cap(self, ticker: str) -> float:
-        # Backward compatibility if needed, but we prefer get_ticker_details
-        d = self.get_ticker_details(ticker)
-        return d.get('market_cap')
+    def build_name_to_ticker_map(self) -> Dict[str, str]:
+        """
+        Build a lowercase company-name → ticker map from SEC EDGAR.
+        Used by RSSPRSource for name-based ticker resolution.
+        Returns empty dict on failure (non-fatal).
+        """
+        logger.info("Building company name → ticker map from SEC EDGAR...")
+        try:
+            url = "https://www.sec.gov/files/company_tickers.json"
+            headers = {"User-Agent": "PRVolumeBot/1.0 contact@example.com"}
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            name_map: Dict[str, str] = {}
+            for entry in data.values():
+                ticker = entry.get("ticker")
+                name = entry.get("title")  # SEC uses "title" for company name
+                if ticker and name and isinstance(name, str):
+                    name_map[name.strip().lower()] = ticker.upper()
+            logger.info(f"Name→ticker map built: {len(name_map)} entries")
+            return name_map
+        except Exception as e:
+            logger.warning(f"Failed to build name→ticker map: {e}")
+            return {}
 
     def get_ticker_details(self, ticker: str) -> Dict:
+        """
+        Single yfinance call returning market_cap, name, sector, and industry.
+        Previously these were fetched in two separate calls (market_data + sectors).
+        """
         try:
             safe_ticker = ticker.replace('.', '-')
             info = yf.Ticker(safe_ticker).info
             return {
                 'market_cap': info.get('marketCap'),
-                'name': info.get('shortName') or info.get('longName') or ticker
+                'name':       info.get('shortName') or info.get('longName') or ticker,
+                'sector':     info.get('sector'),
+                'industry':   info.get('industry'),
             }
         except Exception:
-            return {'market_cap': None, 'name': ticker}
+            return {'market_cap': None, 'name': ticker, 'sector': None, 'industry': None}
