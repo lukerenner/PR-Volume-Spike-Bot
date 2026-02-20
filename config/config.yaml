@@ -7,11 +7,11 @@ universe:
     - "AAPL"
 
 thresholds:
-  volume_multiple_median: 3.0
-  volume_multiple_mean: 3.0
+  volume_multiple_median: 2.0
+  volume_multiple_mean: 2.0
   lookback_days: 30
   min_abs_volume: 25000
-  min_abs_pct_move: 0.0
+  min_abs_pct_move: 3.0  # Require at least 3% price move — filters volume-only noise
 
 # Market Cap Constraint (USD) — raised to $500M to include small-caps
 max_market_cap: 500000000

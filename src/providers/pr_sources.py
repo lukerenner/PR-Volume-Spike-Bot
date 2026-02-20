@@ -3,7 +3,7 @@ import datetime
 import pytz
 import re
 from abc import ABC, abstractmethod
-from typing import List, NamedTuple, Set, Dict
+from typing import List, NamedTuple, Set, Dict, Optional
 import logging
 import time
 
@@ -25,33 +25,47 @@ class PRSource(ABC):
 class RSSPRSource(PRSource):
     """
     Multi-source PR aggregator that pulls from major wire services.
-    Caches the full feed to avoid repeated requests when checking multiple tickers.
+
+    Primary workflow (PR-first):
+      1. Call get_all_candidate_tickers() to get every ticker mentioned in today's PRs.
+      2. The caller checks those tickers for volume spikes.
+      3. Call get_prs(ticker, ...) to retrieve the matching PRs for confirmed spike tickers.
+
+    Caches the full feed for 10 minutes to avoid hammering wire services.
     """
 
-    # Wire service RSS feeds
     RSS_FEEDS = {
-        "PR Newswire": "https://www.prnewswire.com/rss/news-releases-list.rss",
+        "PR Newswire":   "https://www.prnewswire.com/rss/news-releases-list.rss",
+        "Business Wire": "https://feed.businesswire.com/rss/home/?rss=G1&rnum=25",
         "GlobeNewswire": "https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20Releases",
-        "Accesswire": "https://www.accesswire.com/rss/news.xml",
+        "Accesswire":    "https://www.accesswire.com/rss/news.xml",
     }
 
     def __init__(self):
         self._cache: Dict[str, List[dict]] = {}
-        self._cache_time: datetime.datetime = None
+        self._cache_time: Optional[datetime.datetime] = None
         self._cache_ttl = datetime.timedelta(minutes=10)
+        # Injected by main after SEC EDGAR map is loaded
+        self._name_to_ticker: Dict[str, str] = {}
+
+    def set_name_to_ticker_map(self, mapping: Dict[str, str]):
+        """Provide the company-name → ticker lookup built from SEC EDGAR."""
+        self._name_to_ticker = mapping
+
+    # ------------------------------------------------------------------
+    # Internal feed fetch
+    # ------------------------------------------------------------------
 
     def _fetch_all_prs(self) -> List[dict]:
         """Fetch PRs from all wire services, with caching."""
         now = datetime.datetime.now(pytz.utc)
 
-        # Return cached if fresh
         if self._cache_time and (now - self._cache_time) < self._cache_ttl:
             all_items = []
             for items in self._cache.values():
                 all_items.extend(items)
             return all_items
 
-        # Fetch fresh
         self._cache = {}
         for source_name, url in self.RSS_FEEDS.items():
             try:
@@ -65,23 +79,26 @@ class RSSPRSource(PRSource):
                         time.mktime(entry.published_parsed), pytz.utc
                     )
 
-                    # Extract ticker symbols from GlobeNewswire categories
-                    tickers_found = set()
+                    # Extract tickers explicitly embedded in category tags
+                    # (GlobeNewswire and Business Wire use this convention)
+                    tickers_in_category: Set[str] = set()
                     if hasattr(entry, 'tags'):
                         for tag in entry.tags:
                             term = tag.get('term', '')
-                            # Match patterns like "NYSE:ABC" or "NASDAQ:XYZ" or "TSX:ABC"
-                            match = re.search(r'(?:NYSE|NASDAQ|AMEX|OTC|TSX|TSX-V)[:\-]([A-Z]{1,5})', term, re.I)
+                            match = re.search(
+                                r'(?:NYSE|NASDAQ|AMEX|OTC|TSX|TSX-V)[:\-]([A-Z]{1,5})',
+                                term, re.I
+                            )
                             if match:
-                                tickers_found.add(match.group(1).upper())
+                                tickers_in_category.add(match.group(1).upper())
 
                     items.append({
-                        'title': entry.title,
-                        'link': entry.link,
-                        'summary': entry.get('summary', ''),
-                        'published_at': dt_utc,
-                        'source': source_name,
-                        'tickers_in_category': tickers_found,
+                        'title':               entry.title,
+                        'link':                entry.link,
+                        'summary':             entry.get('summary', ''),
+                        'published_at':        dt_utc,
+                        'source':              source_name,
+                        'tickers_in_category': tickers_in_category,
                     })
 
                 self._cache[source_name] = items
@@ -92,97 +109,199 @@ class RSSPRSource(PRSource):
                 self._cache[source_name] = []
 
         self._cache_time = now
-
         all_items = []
         for items in self._cache.values():
             all_items.extend(items)
         logger.info(f"Total PRs in cache: {len(all_items)}")
         return all_items
 
-    def get_prs(self, ticker: str, window_start: datetime.datetime, config: dict, trading_dates: Set[datetime.date] = None) -> List[PRItem]:
-        """Find PRs that mention the given ticker."""
-        safe_ticker = ticker.replace('-', '.').upper()  # Normalize for matching
-        ticker_variants = {
-            ticker.upper(),
-            safe_ticker,
-            ticker.replace('.', '-').upper(),
-        }
+    # ------------------------------------------------------------------
+    # Company-name extraction helpers
+    # ------------------------------------------------------------------
 
+    # Common corporate suffixes to strip before name lookup
+    _CORP_SUFFIXES = re.compile(
+        r'\b(Inc\.?|Corp\.?|Ltd\.?|LLC|L\.L\.C\.?|PLC|plc|Co\.?|'
+        r'Holdings?|Group|Technologies|Technology|Sciences?|Therapeutics|'
+        r'Pharmaceuticals?|Biosciences?|Solutions?|Systems?|Networks?|'
+        r'Enterprises?|International|Worldwide|Global|Capital|Partners?|'
+        r'Acquisition|Acquisitions)\b\.?',
+        re.I
+    )
+
+    def _extract_company_names_from_title(self, title: str) -> List[str]:
+        """
+        Heuristic: the issuing company name is usually the first noun phrase
+        before common PR verbs (Announces, Reports, Completes, etc.).
+        Returns a list of candidate name strings to look up.
+        """
+        # Strip leading source attribution like "COMPANY NAME / Business Wire:"
+        title = re.sub(r'^[^/]+/\s*(?:PR Newswire|Business Wire|GlobeNewswire|Accesswire)\s*[:/—–-]\s*', '', title, flags=re.I)
+
+        # Split on common PR verbs to isolate the company name portion
+        split_pattern = re.compile(
+            r'\s+(?:Announces?|Reports?|Completes?|Launches?|Signs?|Enters?|'
+            r'Secures?|Receives?|Expands?|Awards?|Selects?|Closes?|Grants?|'
+            r'Appoints?|Acquires?|Partners?|Agrees?|Files?|Achieves?|Confirms?|'
+            r'Updates?|Provides?|Releases?|Presents?|Declares?|Regains?|'
+            r'Executes?|Completes?)\b',
+            re.I
+        )
+        parts = split_pattern.split(title, maxsplit=1)
+        if not parts:
+            return []
+
+        raw_name = parts[0].strip()
+        # Drop parenthetical ticker hints like "(NASDAQ: XYZ)"
+        raw_name = re.sub(r'\s*\(.*?\)', '', raw_name).strip()
+
+        candidates = [raw_name]
+
+        # Also try with corporate suffixes stripped
+        stripped = self._CORP_SUFFIXES.sub('', raw_name).strip().strip(',').strip()
+        if stripped and stripped != raw_name:
+            candidates.append(stripped)
+
+        return [c for c in candidates if len(c) > 2]
+
+    def _resolve_name_to_ticker(self, name: str) -> Optional[str]:
+        """Look up a company name in the SEC EDGAR map (case-insensitive)."""
+        if not self._name_to_ticker:
+            return None
+        key = name.strip().lower()
+        return self._name_to_ticker.get(key)
+
+    # ------------------------------------------------------------------
+    # Ticker extraction — inline tags OR name resolution
+    # ------------------------------------------------------------------
+
+    def _get_tickers_for_pr(self, pr: dict) -> Set[str]:
+        """
+        Return the set of tickers associated with a PR entry.
+        Strategy (in priority order):
+          1. Explicit exchange:ticker tags in the feed categories.
+          2. Ticker symbol mentioned directly in title/summary text.
+          3. Company name → ticker via SEC EDGAR name map.
+        """
+        tickers: Set[str] = set()
+
+        # 1. Category tags (most reliable)
+        tickers.update(pr.get('tickers_in_category', set()))
+        if tickers:
+            return tickers
+
+        title = pr.get('title', '')
+        summary = pr.get('summary', '')
+        full_text = (title + ' ' + summary).upper()
+
+        # 2. Bare ticker mentioned in text — pattern: (NASDAQ: XYZ) or NYSE:XYZ
+        exchange_tagged = re.findall(
+            r'(?:NYSE|NASDAQ|AMEX|OTC)[:\s]+([A-Z]{1,5})\b', full_text
+        )
+        tickers.update(exchange_tagged)
+        if tickers:
+            return tickers
+
+        # 3. Name-to-ticker resolution
+        for candidate_name in self._extract_company_names_from_title(title):
+            ticker = self._resolve_name_to_ticker(candidate_name)
+            if ticker:
+                tickers.add(ticker)
+                break  # One match is enough
+
+        return tickers
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_all_candidate_tickers(
+        self,
+        window_start: datetime.datetime,
+        config: dict,
+        trading_dates: Set[datetime.date] = None,
+    ) -> Dict[str, List[dict]]:
+        """
+        PR-first entry point.
+
+        Returns a dict mapping ticker → list of matching PR dicts for all PRs
+        published after window_start that pass keyword and time filters.
+        The caller iterates over these tickers, checks volume spikes, then
+        calls get_prs() to fetch the structured PRItem list for confirmed spikes.
+        """
         pr_cfg = config.get('pr_config', {})
         required_keywords = [k.lower() for k in pr_cfg.get('required_keywords', [])]
 
-        # Exclusion Window (empty strings disable the exclusion)
-        excl_start_str = pr_cfg.get('exclude_time_start_et', "")
-        excl_end_str = pr_cfg.get('exclude_time_end_et', "")
-        t_start = None
-        t_end = None
+        excl_start_str = pr_cfg.get('exclude_time_start_et', '')
+        excl_end_str = pr_cfg.get('exclude_time_end_et', '')
+        t_start = t_end = None
         if excl_start_str and excl_end_str:
             try:
                 h1, m1 = map(int, excl_start_str.split(':'))
                 h2, m2 = map(int, excl_end_str.split(':'))
                 t_start = datetime.time(h1, m1)
                 t_end = datetime.time(h2, m2)
-            except:
-                t_start, t_end = None, None
+            except Exception:
+                pass
 
         all_prs = self._fetch_all_prs()
-        results = []
+        ticker_to_prs: Dict[str, List[dict]] = {}
 
         for pr in all_prs:
             dt_utc = pr['published_at']
 
-            # Time window check
             if dt_utc <= window_start.replace(tzinfo=pytz.utc):
                 continue
 
-            # Check if ticker matches
-            ticker_match = False
-
-            # 1. Check category tags (most reliable for GlobeNewswire)
-            if ticker_variants & pr.get('tickers_in_category', set()):
-                ticker_match = True
-
-            # 2. Check title/summary for ticker mention with word boundaries
-            if not ticker_match:
-                full_text = (pr['title'] + " " + pr.get('summary', '')).upper()
-                for variant in ticker_variants:
-                    # Match ticker with word boundaries (not part of another word)
-                    pattern = r'\b' + re.escape(variant) + r'\b'
-                    if re.search(pattern, full_text):
-                        ticker_match = True
-                        break
-
-            if not ticker_match:
-                continue
-
-            # Keyword check (optional - if configured)
-            full_text_lower = (pr['title'] + " " + pr.get('summary', '')).lower()
+            # Keyword filter
+            full_text_lower = (pr['title'] + ' ' + pr.get('summary', '')).lower()
             if required_keywords and not any(k in full_text_lower for k in required_keywords):
                 continue
 
-            # Market hours exclusion
+            # Market-hours exclusion
             dt_et = dt_utc.astimezone(EASTERN)
             pr_date = dt_et.date()
-
             should_check_time = True
             if trading_dates is not None:
                 if pr_date not in trading_dates:
                     should_check_time = False
-            else:
-                if dt_et.weekday() >= 5:  # Sat/Sun
-                    should_check_time = False
+            elif dt_et.weekday() >= 5:
+                should_check_time = False
 
-            if should_check_time and t_start is not None and t_end is not None:
-                t = dt_et.time()
-                if t_start <= t <= t_end:
+            if should_check_time and t_start and t_end:
+                if t_start <= dt_et.time() <= t_end:
                     continue
 
+            # Resolve tickers
+            tickers = self._get_tickers_for_pr(pr)
+            for ticker in tickers:
+                ticker_to_prs.setdefault(ticker, []).append(pr)
+
+        logger.info(f"PR-first: resolved {len(ticker_to_prs)} candidate tickers from RSS feeds")
+        return ticker_to_prs
+
+    def get_prs(
+        self,
+        ticker: str,
+        window_start: datetime.datetime,
+        config: dict,
+        trading_dates: Set[datetime.date] = None,
+    ) -> List[PRItem]:
+        """
+        Returns structured PRItems for a specific ticker (used after volume
+        spike confirmation to build the alert payload).
+        """
+        # Pull from the candidate map if cache is warm
+        candidate_map = self.get_all_candidate_tickers(window_start, config, trading_dates)
+        raw_prs = candidate_map.get(ticker.upper(), [])
+
+        results = []
+        for pr in raw_prs:
             results.append(PRItem(
                 ticker=ticker,
                 headline=pr['title'],
                 url=pr['link'],
                 source=pr['source'],
-                published_at=dt_utc
+                published_at=pr['published_at'],
             ))
-
         return results
