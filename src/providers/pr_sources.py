@@ -1,3 +1,4 @@
+import calendar
 import feedparser
 import datetime
 import pytz
@@ -35,10 +36,12 @@ class RSSPRSource(PRSource):
     """
 
     RSS_FEEDS = {
-        "PR Newswire":   "https://www.prnewswire.com/rss/news-releases-list.rss",
-        "Business Wire": "https://feed.businesswire.com/rss/home/?rss=G1&rnum=25",
-        "GlobeNewswire": "https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20Releases",
-        "Accesswire":    "https://www.accesswire.com/rss/news.xml",
+        # GlobeNewswire exchange feeds: 100% ticker-tagged, US-listed companies only
+        "GlobeNewswire NASDAQ": "https://www.globenewswire.com/RssFeed/exchange/NASDAQ",
+        "GlobeNewswire NYSE":   "https://www.globenewswire.com/RssFeed/exchange/NYSE",
+        "GlobeNewswire AMEX":   "https://www.globenewswire.com/RssFeed/exchange/AMEX",
+        # PR Newswire general feed — lower resolution but adds diversity
+        "PR Newswire":          "https://www.prnewswire.com/rss/news-releases-list.rss",
     }
 
     def __init__(self):
@@ -75,8 +78,10 @@ class RSSPRSource(PRSource):
                     if not hasattr(entry, 'published_parsed') or not entry.published_parsed:
                         continue
 
+                    # Use calendar.timegm (treats struct_time as UTC) to avoid
+                    # time.mktime's local-timezone misinterpretation bug
                     dt_utc = datetime.datetime.fromtimestamp(
-                        time.mktime(entry.published_parsed), pytz.utc
+                        calendar.timegm(entry.published_parsed), pytz.utc
                     )
 
                     # Extract tickers explicitly embedded in category tags
@@ -92,10 +97,18 @@ class RSSPRSource(PRSource):
                             if match:
                                 tickers_in_category.add(match.group(1).upper())
 
+                    # Pull full text: try summary, then description, then content
+                    summary = (
+                        entry.get('summary')
+                        or entry.get('description')
+                        or (entry.content[0].get('value', '') if hasattr(entry, 'content') and entry.content else '')
+                        or ''
+                    )
+
                     items.append({
                         'title':               entry.title,
                         'link':                entry.link,
-                        'summary':             entry.get('summary', ''),
+                        'summary':             summary,
                         'published_at':        dt_utc,
                         'source':              source_name,
                         'tickers_in_category': tickers_in_category,
@@ -199,6 +212,12 @@ class RSSPRSource(PRSource):
             r'(?:NYSE|NASDAQ|AMEX|OTC)[:\s]+([A-Z]{1,5})\b', full_text
         )
         tickers.update(exchange_tagged)
+        if tickers:
+            return tickers
+
+        # 2b. $TICKER format (common in financial wire copy, e.g. "$PLTR")
+        dollar_tickers = re.findall(r'\$([A-Z]{1,5})\b', full_text)
+        tickers.update(dollar_tickers)
         if tickers:
             return tickers
 

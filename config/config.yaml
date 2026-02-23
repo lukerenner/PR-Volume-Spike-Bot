@@ -11,10 +11,10 @@ thresholds:
   volume_multiple_mean: 2.0
   lookback_days: 30
   min_abs_volume: 25000
-  min_abs_pct_move: 3.0  # Require at least 3% price move — filters volume-only noise
+  min_abs_pct_move: 1.0  # Require at least 1% price move — 3% was filtering too aggressively
 
-# Market Cap Constraint (USD) — raised to $500M to include small-caps
-max_market_cap: 500000000
+# Market Cap Constraint (USD) — up to $2B to capture small and mid-cap PR-driven spikes
+max_market_cap: 2000000000
 
 pr_config:
   window_hours: 36
@@ -41,14 +41,12 @@ pr_config:
     - "signs"
     - "secures"
     - "receives"
-  # Allowed sources (substring match)
+  # Allowed sources (substring match against source name)
   allowed_sources:
+    - "GlobeNewswire"
     - "PR Newswire"
     - "Business Wire"
-    - "GlobeNewswire"
     - "Accesswire"
-    - "Cision"
-    - "Newsfile"
 
 slack:
   webhook_env_var: "SLACK_WEBHOOK_URL"

@@ -81,12 +81,20 @@ def main():
                 logger.info(f"Market confirmed open. Last data: {last_date}")
 
             if len(spy) >= 2:
-                prev_day_date = spy.index[-2].date()
+                last_trading_day = spy.index[-1].date()
+                today_dt = datetime.datetime.now(EASTERN).date()
+                if last_trading_day < today_dt:
+                    # Market hasn't opened today yet (morning / weekend / holiday)
+                    # Search from the most recent trading day's close
+                    prev_day_date = last_trading_day
+                else:
+                    # Market is open today — search from the prior session's close
+                    prev_day_date = spy.index[-2].date()
                 prev_close_et = EASTERN.localize(
                     datetime.datetime.combine(prev_day_date, datetime.time(16, 0))
                 )
                 search_start_time = prev_close_et.astimezone(pytz.utc)
-                logger.info(f"PR search window starts at: {search_start_time} (UTC)")
+                logger.info(f"PR search window starts at: {search_start_time} (prev close: {prev_day_date})")
             else:
                 logger.warning("Not enough SPY data for previous close. Using default 48h window.")
 
@@ -149,7 +157,7 @@ def main():
             logger.error(f"Download failed for chunk: {e}")
             continue
 
-        is_multi = len(chunk) > 1 and isinstance(data.columns, pd.MultiIndex)
+        is_multi = isinstance(data.columns, pd.MultiIndex)
 
         for ticker in chunk:
             stats['scanned'] += 1
@@ -235,6 +243,9 @@ def main():
             logger.info(f"  {a['ticker']}: {a['pr'].headline}")
     else:
         logger.info(f"{run_label} run found 0 alerts.")
+        # Send a daily heartbeat on the Closing run so the channel confirms the bot is live
+        if run_label == "Closing" and not args.dry_run:
+            notifier.post_status(stats, run_label=run_label)
 
     label_slug = run_label.lower()
     report_path = Path(f"daily_report_{label_slug}.json")

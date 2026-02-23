@@ -1,9 +1,22 @@
+import re
 import yfinance as yf
 import pandas as pd
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict
 import logging
 import requests
+
+# Suffixes to strip when building short-name lookup keys
+# Allows matching "Palantir Technologies" → "PLTR" even though
+# SEC EDGAR has the name "PALANTIR TECHNOLOGIES INC"
+_SUFFIX_STRIP = re.compile(
+    r'\s+(Inc\.?|Corp\.?|Ltd\.?|LLC|L\.L\.C\.?|PLC|plc|Co\.?|'
+    r'Holdings?|Group|Technologies?|Technology|Sciences?|Therapeutics|'
+    r'Pharmaceuticals?|Biosciences?|Solutions?|Systems?|Networks?|'
+    r'Enterprises?|International|Worldwide|Global|Capital|Partners?|'
+    r'Acquisition|Acquisitions)\b\.?\s*$',
+    re.I
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +121,14 @@ class YFinanceProvider(MarketDataProvider):
                 ticker = entry.get("ticker")
                 name = entry.get("title")  # SEC uses "title" for company name
                 if ticker and name and isinstance(name, str):
-                    name_map[name.strip().lower()] = ticker.upper()
+                    full_key = name.strip().lower()
+                    name_map[full_key] = ticker.upper()
+                    # Also index the suffix-stripped version so a PR saying
+                    # "Palantir Technologies" resolves to PLTR even though
+                    # SEC EDGAR stores "PALANTIR TECHNOLOGIES INC"
+                    stripped = _SUFFIX_STRIP.sub('', name.strip()).strip().lower()
+                    if stripped and stripped != full_key and stripped not in name_map:
+                        name_map[stripped] = ticker.upper()
             logger.info(f"Name→ticker map built: {len(name_map)} entries")
             return name_map
         except Exception as e:

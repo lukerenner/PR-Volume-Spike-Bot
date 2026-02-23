@@ -76,5 +76,26 @@ class SlackNotifier:
         except Exception as e:
             logger.error(f"Failed to post to Slack: {e}")
 
+    def post_status(self, stats: dict, run_label: str = ""):
+        """Post a brief status message when the bot runs but finds no alerts.
+        Helps confirm the bot is alive and shows scan stats."""
+        if not self.webhook_url:
+            return
+        now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+        time_str = now_et.strftime("%-I:%M %p ET")
+        candidates = stats.get('pr_candidates', 0)
+        scanned = stats.get('scanned', 0)
+        text = (
+            f":white_check_mark: *{run_label} Scan Complete* — {time_str}\n"
+            f"  PR candidates: {candidates} | Scanned: {scanned} | Alerts: 0\n"
+            f"  _No PR-driven volume spikes met threshold today._"
+        )
+        try:
+            resp = requests.post(self.webhook_url, json={"text": text})
+            resp.raise_for_status()
+            logger.info(f"Slack status posted ({run_label}, 0 alerts)")
+        except Exception as e:
+            logger.error(f"Failed to post Slack status: {e}")
+
     def post_alert(self, *args, **kwargs): pass
     def post_summary(self, *args, **kwargs): pass
