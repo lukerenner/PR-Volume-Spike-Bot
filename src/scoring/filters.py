@@ -7,6 +7,9 @@ class FilterEngine:
     def __init__(self, config: dict, denylist: Set[str]):
         self.excluded_sectors = set(config['exclusions']['sectors'])
         self.keywords = set(k.lower() for k in config['exclusions']['industries_keywords'])
+        self.financial_keywords = [
+            k.lower() for k in config['exclusions'].get('financial_disclosure_keywords', [])
+        ]
         self.denylist = denylist
         self.max_market_cap = config.get('max_market_cap')  # None = no limit
 
@@ -52,4 +55,16 @@ class FilterEngine:
                 if k in text_lower:
                     return True, f"PR keyword: {k}"
 
+        return False, ""
+
+    def is_financial_disclosure(self, headline: str) -> Tuple[bool, str]:
+        """
+        Returns (True, matched_keyword) if the headline is a financial disclosure
+        (earnings, offerings, splits, dividends, debt, etc.) that is not replicable
+        by a marketing team and should be suppressed.
+        """
+        h = headline.lower()
+        for kw in self.financial_keywords:
+            if kw in h:
+                return True, kw
         return False, ""
