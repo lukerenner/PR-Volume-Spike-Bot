@@ -131,8 +131,27 @@ def main():
         trading_dates=trading_dates,
     )
 
+    # Pre-filter: drop any ticker whose PR headlines are all financial disclosures
+    # (earnings, offerings, splits, dividends, etc.) — not replicable by marketing.
+    filter_engine_pre = FilterEngine(cfg, denylist)
+    financial_filtered_pre = 0
+    filtered_candidate_map = {}
+    for ticker, raw_prs in candidate_ticker_map.items():
+        non_financial_prs = []
+        for raw_pr in raw_prs:
+            is_fin, fin_kw = filter_engine_pre.is_financial_disclosure(raw_pr.get('title', ''))
+            if is_fin:
+                logger.debug(f"Pre-filter: dropping {ticker} PR '{raw_pr.get('title','')[:60]}' — financial keyword: {fin_kw}")
+            else:
+                non_financial_prs.append(raw_pr)
+        if non_financial_prs:
+            filtered_candidate_map[ticker] = non_financial_prs
+        else:
+            financial_filtered_pre += 1
+    candidate_ticker_map = filtered_candidate_map
+
     pr_tickers = list(candidate_ticker_map.keys())
-    logger.info(f"Candidate tickers from PRs: {len(pr_tickers)}")
+    logger.info(f"Candidate tickers from PRs: {len(pr_tickers)} ({financial_filtered_pre} dropped as financial disclosures)")
 
     stats = {
         "pr_candidates": len(pr_tickers),
@@ -140,6 +159,7 @@ def main():
         "spikes": 0,
         "cap_filtered": 0,
         "pharma_filtered": 0,
+        "financial_filtered": financial_filtered_pre,
         "alerts": 0,
     }
     alerts_generated = []
@@ -217,6 +237,13 @@ def main():
             if is_excl_pr:
                 stats['pharma_filtered'] += 1
                 logger.info(f"Filtered {ticker} by PR headline: {reason_pr}")
+                continue
+
+            # Double-check PR headline isn't a financial disclosure
+            is_fin, fin_kw = filter_engine.is_financial_disclosure(top_pr.headline)
+            if is_fin:
+                stats['financial_filtered'] += 1
+                logger.info(f"Filtered {ticker} by financial disclosure keyword: {fin_kw}")
                 continue
 
             stats['alerts'] += 1
